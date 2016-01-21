@@ -142,12 +142,16 @@ func (s *SignalFx) emitMetrics(metrics []metric.Metric) bool {
 		return false
 	}
 
-	s.httpClient.SetHeader(map[string]string{
+	customHeader := map[string]string{
 		"X-SF-TOKEN":   s.authToken,
 		"Content-Type": "application/x-protobuf",
-	})
+	}
 
-	rsp, err := s.httpClient.MakeRequest("POST", s.endpoint, bytes.NewBuffer(serialized))
+	rsp, err := s.httpClient.MakeRequest(
+		"POST",
+		s.endpoint,
+		bytes.NewBuffer(serialized),
+		customHeader)
 
 	if err != nil {
 		s.log.Error("Failed to make request ", err,

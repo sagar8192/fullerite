@@ -7,9 +7,9 @@ import (
 	"os"
 	"testing"
 
+	"encoding/json"
 	"github.com/Sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
-	"encoding/json"
 )
 
 var testBadConfiguration = `{

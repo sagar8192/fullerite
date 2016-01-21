@@ -5,14 +5,15 @@ import (
 	"io/ioutil"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 )
 
 // HTTPAlive implements a simple way of reusing http connections
 type HTTPAlive struct {
-	client       *http.Client
-	transport    *http.Transport
-	customHeader map[string]string
+	client    *http.Client
+	transport *http.Transport
+	mu        sync.Mutex
 }
 
 // HTTPAliveResponse returns a response
@@ -43,16 +44,11 @@ func (connection *HTTPAlive) Configure(timeout time.Duration,
 	}
 }
 
-// SetHeader for setting some custom headers
-func (connection *HTTPAlive) SetHeader(header map[string]string) {
-	connection.customHeader = header
-}
-
 // MakeRequest make a new http request
 func (connection *HTTPAlive) MakeRequest(method string,
-	uri string, body io.Reader) (*HTTPAliveResponse, error) {
-
-	defer connection.resetCustomHeader()
+	uri string, body io.Reader, header map[string]string) (*HTTPAliveResponse, error) {
+	connection.mu.Lock()
+	defer connection.mu.Unlock()
 	req, err := http.NewRequest(method, uri, body)
 
 	if err != nil {
@@ -60,7 +56,7 @@ func (connection *HTTPAlive) MakeRequest(method string,
 	}
 
 	// Apply user provided headers
-	for key, value := range connection.customHeader {
+	for key, value := range header {
 		req.Header.Set(key, value)
 	}
 
@@ -88,10 +84,6 @@ func (connection *HTTPAlive) submitRequest(req *http.Request) (*HTTPAliveRespons
 	httpAliveResponse.StatusCode = rsp.StatusCode
 	httpAliveResponse.Header = rsp.Header
 	return httpAliveResponse, nil
-}
-
-func (connection *HTTPAlive) resetCustomHeader() {
-	connection.customHeader = make(map[string]string)
 }
 
 func discardResponseBody(body io.ReadCloser) {
