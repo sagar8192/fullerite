@@ -5,7 +5,6 @@ import (
 	"io/ioutil"
 	"net"
 	"net/http"
-	"sync"
 	"time"
 )
 
@@ -13,7 +12,6 @@ import (
 type HTTPAlive struct {
 	client    *http.Client
 	transport *http.Transport
-	mu        sync.Mutex
 }
 
 // HTTPAliveResponse returns a response
@@ -47,8 +45,6 @@ func (connection *HTTPAlive) Configure(timeout time.Duration,
 // MakeRequest make a new http request
 func (connection *HTTPAlive) MakeRequest(method string,
 	uri string, body io.Reader, header map[string]string) (*HTTPAliveResponse, error) {
-	connection.mu.Lock()
-	defer connection.mu.Unlock()
 	req, err := http.NewRequest(method, uri, body)
 
 	if err != nil {
