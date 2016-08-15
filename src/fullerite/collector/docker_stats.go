@@ -3,6 +3,7 @@ package collector
 import (
 	"fullerite/config"
 	"fullerite/metric"
+	"math"
 	"reflect"
 	"regexp"
 	"strings"
@@ -18,6 +19,17 @@ const (
 	endpoint = "unix:///var/run/docker.sock"
 )
 
+type rawStats struct {
+	Container *docker.Container
+	Stats     *docker.Stats
+}
+
+type statsStore struct {
+	statsPerImage map[string][]*rawStats
+	lock          *sync.Mutex
+	lastFlush     int32
+}
+
 // DockerStats collector type.
 // previousCPUValues contains the last cpu-usage values per container.
 // dockerClient is the client for the Docker remote API.
@@ -31,6 +43,8 @@ type DockerStats struct {
 	endpoint          string
 	mu                *sync.Mutex
 	emitImageName     bool
+	aggregateMetrics  bool
+	statsStore        *statsStore
 }
 
 // CPUValues struct contains the last cpu-usage values in order to compute properly the current values.
@@ -64,6 +78,12 @@ func newDockerStats(channel chan metric.Metric, initialInterval int, log *l.Entr
 	d.previousCPUValues = make(map[string]*CPUValues)
 	d.compiledRegex = make(map[string]*Regex)
 	d.emitImageName = false
+	d.aggregateMetrics = false
+	d.statsStore = &statsStore{
+		statsPerImage: make(map[string][]*rawStats),
+		lock:          new(sync.Mutex),
+		lastFlush:     int32(time.Now().Unix()),
+	}
 	return d
 }
 
@@ -96,6 +116,14 @@ func (d *DockerStats) Configure(configMap map[string]interface{}) {
 		}
 	}
 
+    if aggregateMetrics, exists := configMap["aggregate_metrics"]; exists {
+		if boolean, ok := aggregateMetrics.(bool); ok {
+			d.aggregateMetrics = boolean
+		} else {
+			d.log.Warn("Failed to cast aggregate_metrics: ", reflect.TypeOf(aggregateMetrics))
+		}
+	}
+
 	d.dockerClient, _ = docker.NewClient(d.endpoint)
 	if generatedDimensions, exists := configMap["generatedDimensions"]; exists {
 		for dimension, generator := range generatedDimensions.(map[string]interface{}) {
@@ -123,6 +151,7 @@ func (d *DockerStats) Collect() {
 		d.log.Error("Invalid endpoint: ", docker.ErrInvalidEndpoint)
 		return
 	}
+	d.flushMetricsIfNecessary()
 	containers, err := d.dockerClient.ListContainers(docker.ListContainersOptions{All: false})
 	if err != nil {
 		d.log.Error("ListContainers() failed: ", err)
@@ -166,14 +195,70 @@ func (d *DockerStats) getDockerContainerInfo(container *docker.Container) {
 		}
 		done <- true
 
-		metrics := d.extractMetrics(container, stats)
-		d.sendMetrics(metrics)
+		if d.aggregateMetrics {
+			d.bufferMetrics(container, stats)
+		} else {
+			metrics := d.extractMetrics(container, stats)
+			d.sendMetrics(metrics)
+		}
 
 		break
 	case <-time.After(time.Duration(d.statsTimeout) * time.Second):
 		d.log.Error("Timed out collecting stats for container ", container.ID)
 		done <- true
 		break
+	}
+}
+
+func (d *DockerStats) flushMetricsIfNecessary() {
+	if d.aggregateMetrics {
+		if (int32(time.Now().Unix()) - d.statsStore.lastFlush) > 60 {
+			// Aggregate and flush metrics
+			d.aggregateAndEmitMetrics()
+		}
+	}
+}
+
+func (d *DockerStats) aggregateAndEmitMetrics() {
+	d.statsStore.lock.Lock()
+	d.statsStore.lock.Unlock()
+
+	metrics := []metric.Metric{}
+	for key, value := range d.statsStore.statsPerImage {
+		maxMem := float64(0.0)
+		for _, rawstats := range value {
+			maxMem = math.Max(float64(rawstats.Stats.MemoryStats.Usage), maxMem)
+		}
+		metric := buildDockerMetric("DockerMemoryUsed", metric.Gauge, maxMem)
+		metric.AddDimension("image_name", key)
+		metric.AddDimension("roll_up", "max")
+		metrics = append(metrics, metric)
+	}
+	d.log.Warn("Going to flush metrics, count :", len(metrics))
+	d.sendMetrics(metrics)
+	d.statsStore.lastFlush = int32(time.Now().Unix())
+}
+
+func (d *DockerStats) bufferMetrics(container *docker.Container, stats *docker.Stats) {
+	d.statsStore.lock.Lock()
+	d.statsStore.lock.Unlock()
+
+	rawstats := rawStats{
+		Container: container,
+		Stats:     stats,
+	}
+
+	stringList := strings.Split(container.Config.Image, ":")
+	imageName := stringList[0]
+	if stats, ok := d.statsStore.statsPerImage[imageName]; ok {
+		stats = append(stats, &rawstats)
+	} else {
+		d.log.Warn("Going add the first entry to map!!!")
+		d.statsStore.statsPerImage[imageName] = []*rawStats{}
+		d.statsStore.statsPerImage[imageName] = append(
+			d.statsStore.statsPerImage[imageName],
+			&rawstats,
+		)
 	}
 }
 
@@ -225,6 +310,7 @@ func (d DockerStats) buildMetrics(container *docker.Container, containerStats *d
 
 // sendMetrics writes all the metrics received to the collector channel.
 func (d DockerStats) sendMetrics(metrics []metric.Metric) {
+	d.log.Warn("Sending metrics!!!")
 	for _, m := range metrics {
 		d.Channel() <- m
 	}
